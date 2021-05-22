@@ -5,7 +5,8 @@
 You need to install all requirements
 
 ```shell script
-pip install -r requirements
+cd fb_pages_downloader
+pip install .
 ```
 
 After that you should create your `.env` file from template
