@@ -31,6 +31,33 @@ from ..settings import InsightsForPeriodEnum, Settings
 
 
 class MainService(ServiceMixin):
+    """
+    Service for loading data from Facebook Pages API and saving to database
+
+    All methods in service run concurrently, tasks can run another tasks.
+    Next scheme describes tasks relations:
+
+                       ______
+                      |start|
+                      |_____|
+                   ______|_____
+           _______|______     |
+           |load_account|    ...
+           |____________|
+         ________|____________________________________________________________________
+    _____|_____   |   ________|________   |                                 _________|_________
+    |load_page|  ...  |load_page_posts|  ...                                |load_page_insights|
+    |_________|       |_______________|                                     |__________________|
+                  ____________|________________________________________              |
+    ______________|_____________   |   ______________|_____________   |              |
+    |load_page_post_attachments|  ...  |update_or_create_page_post|  ...             |
+    |__________________________|       |__________________________|                  |
+                  |____________________________                            __________|_________
+    ______________|________________________   |            ________________|______________    |
+    |update_or_create_page_post_attachment|  ...           |update_or_create_page_insight|   ...
+    |_____________________________________|                |_____________________________|
+    """
+
     DATE_FORMAT = "%Y-%m-%dT%H:%M:%S+0000"
     INSIGHT_MODELS = (
         PagePostEngagementsDay,
@@ -80,7 +107,7 @@ class MainService(ServiceMixin):
             use_ssl=settings.email_use_ssl,
         )
         self._logger_email_sink_id = None
-        self._logger_file_sink_id = None
+        self._logger_file_sink_ids = []
 
     @property
     def dependencies(self) -> List[ServiceMixin]:
@@ -97,11 +124,8 @@ class MainService(ServiceMixin):
     async def start(self):
         logger.info("Main service started.")
         self._logger_email_sink_id = logger.add(self.email_service.logger_sink, level="ERROR")
-        if self.settings.log_file:
-            self._logger_file_sink_id = logger.add(
-                self.settings.log_file,
-                level=self.settings.log_file_level,
-            )
+        for filename, level in self.settings.log_files.items():
+            self._logger_file_sink_ids.append(logger.add(filename, level=level.value))
 
         await asyncio.gather(*(
             self.load_account(access_token)
@@ -110,8 +134,9 @@ class MainService(ServiceMixin):
 
     async def stop(self):
         logger.remove(self._logger_email_sink_id)
-        if self._logger_file_sink_id is not None:
-            logger.remove(self._logger_file_sink_id)
+        for sink_id in self._logger_file_sink_ids:
+            logger.remove(sink_id)
+        self._logger_file_sink_ids.clear()
         logger.info("Main service stopped.")
 
     @logger.catch()
@@ -123,6 +148,7 @@ class MainService(ServiceMixin):
         tasks = []
         async for account in accounts_generator:
             logger.info("Downloaded account: account_id={}", account["id"])
+            logger.debug("Account payload: {}", account)
 
             page_id = account["id"]
             access_token = account["access_token"]
@@ -160,6 +186,7 @@ class MainService(ServiceMixin):
             access_token=access_token,
         )
         logger.info("Downloaded page: page_id={}", page_id)
+        logger.debug("Page payload: {}", data)
         fields = {
             "id": data["id"],
             "name": data["name"],
@@ -197,6 +224,7 @@ class MainService(ServiceMixin):
         else:
             await self.database_service.create_page(fields=fields)
             logger.info("Created page: page_id={}", page_id)
+        logger.debug("Page fields: {}", fields)
 
     @logger.catch()
     async def load_page_posts(self, page_id: str, access_token: str):
@@ -208,17 +236,19 @@ class MainService(ServiceMixin):
         tasks = []
         async for page_post in generator:
             logger.info("Downloaded page post: page_post_id={}", page_post["id"])
+            logger.debug("Page post payload: {}", page_post)
 
             task = asyncio.create_task(self.update_or_create_page_post(data=page_post))
             tasks.append(task)
 
-            _, post_id = page_post["id"].split("_")
-            task = asyncio.create_task(self.load_page_post_attachments(
-                page_id=page_id,
-                post_id=post_id,
-                access_token=access_token,
-            ))
-            tasks.append(task)
+            if self.settings.load_page_post_attachments:
+                _, post_id = page_post["id"].split("_")
+                task = asyncio.create_task(self.load_page_post_attachments(
+                    page_id=page_id,
+                    post_id=post_id,
+                    access_token=access_token,
+                ))
+                tasks.append(task)
 
         if tasks:
             await asyncio.wait(tasks)
@@ -254,6 +284,7 @@ class MainService(ServiceMixin):
         else:
             await self.database_service.create_page_post(fields=fields)
             logger.info("Created page post: page_post_id={}", data["id"])
+        logger.debug("Page post fields: {}", fields)
 
     @logger.catch()
     async def load_page_post_attachments(self, page_id: str, post_id: str, access_token: str):
@@ -266,6 +297,7 @@ class MainService(ServiceMixin):
         tasks = []
         async for page_post_attachment in generator:
             logger.info("Downloaded page post attachment: page_id={}; post_id={}", page_id, post_id)
+            logger.debug("Page post attachment payload: {}", page_post_attachment)
 
             task = asyncio.create_task(self.update_or_create_page_post_attachment(
                 page_id=page_id,
@@ -300,6 +332,7 @@ class MainService(ServiceMixin):
                 fields=fields,
             )
             logger.info("Updated page post attachment: page_id={}; post_id={}", page_id, post_id)
+            logger.debug("Page post attachment fields: {}", fields)
 
     @logger.catch()
     async def load_page_insights(
@@ -325,6 +358,7 @@ class MainService(ServiceMixin):
                 page_id,
                 page_insight["id"],
             )
+            logger.debug("Page insight payload: {}", page_insight)
 
             task = asyncio.create_task(self.update_or_create_page_insight(
                 view_model=view_model,
@@ -345,6 +379,7 @@ class MainService(ServiceMixin):
     ):
         get_function = self.database_service.generate_get_function(view_model)
         create_function = self.database_service.generate_create_function(view_model)
+        update_function = self.database_service.generate_update_function(view_model)
 
         for value in data["values"]:
             fields = {
@@ -361,3 +396,11 @@ class MainService(ServiceMixin):
                     page_id,
                     value["end_time"],
                 )
+            else:
+                await update_function(record=record, fields=fields)
+                logger.info(
+                    "Updated page insight: page_id={}; date={}",
+                    page_id,
+                    value["end_time"],
+                )
+            logger.debug("Page insight fields: {}", fields)

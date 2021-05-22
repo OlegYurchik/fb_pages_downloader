@@ -31,6 +31,7 @@ class LogLevelEnum(str, enum.Enum):
 class Settings(BaseSettings):
     load_pages: bool = True
     load_page_posts: bool = True
+    load_page_post_attachments: bool = True
     load_page_insights: bool = True
 
     fb_pages_access_tokens: List[str] = []
@@ -51,8 +52,17 @@ class Settings(BaseSettings):
     email_use_tls: bool = False
     email_use_ssl: bool = False
 
-    log_file: Optional[str] = None
-    log_file_level: LogLevelEnum = LogLevelEnum.INFO
+    log_files: Optional[Dict[str, LogLevelEnum]] = None
+
+    @classmethod
+    @validator("load_page_post_attachments")
+    def check_load_page_post_attachments(cls, value: bool, values: Dict[str, Any]) -> bool:
+        if value and not values.get("load_page_posts"):
+            raise ValueError(
+                "For set 'load_page_post_attachments' in 'True' "
+                "value 'load_page_posts' must be 'True' too"
+            )
+        return value
 
     @classmethod
     @validator("email_use_tls", "email_use_ssl")
@@ -62,7 +72,6 @@ class Settings(BaseSettings):
         if email_use_ssl and email_use_tls:
             raise ValueError("Only one of 'email_use_tls' and 'email_use_ssl' can be 'True'")
         return value
-
 
     @classmethod
     @validator(
