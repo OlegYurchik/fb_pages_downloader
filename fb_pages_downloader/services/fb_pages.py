@@ -126,22 +126,22 @@ class FacebookPagesService(ServiceMixin):
         async for post in self.request_with_paging(url=url, params=params):
             yield post
 
-    async def get_page_insights(
+    async def get_insights(
             self,
-            page_id: str,
+            object_id: str,
             access_token: str,
             since: Optional[datetime.date] = None,
             metrics: Optional[Iterable[str]] = None,
             period: Optional[str] = None,
     ) -> AsyncGenerator[Dict[str, Any], None]:
-        url = self.BASE_URL / self._version / page_id / "insights"
+        url = self.BASE_URL / self._version / object_id / "insights"
         params = {"access_token": access_token}
         if metrics is not None:
             params["metric"] = ",".join(metrics)
         if period is not None:
             params["period"] = period
-        # if since is not None:
-        #     params["since"] = since.strftime("%Y-%m-%d")
+        if since is not None:
+            params["since"] = since.strftime("%Y-%m-%d")
         async for insight in self.request_with_paging(url=url, params=params):
             yield insight
 

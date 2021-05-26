@@ -30,9 +30,10 @@ class LogLevelEnum(str, enum.Enum):
 
 class Settings(BaseSettings):
     load_pages: bool = True
+    load_page_insights: bool = True
     load_page_posts: bool = True
     load_page_post_attachments: bool = True
-    load_page_insights: bool = True
+    load_page_post_insights: bool = True
 
     fb_pages_access_tokens: List[str] = []
     fb_pages_insights_for: InsightsForPeriodEnum = InsightsForPeriodEnum.day
@@ -55,13 +56,10 @@ class Settings(BaseSettings):
     log_files: Optional[Dict[str, LogLevelEnum]] = None
 
     @classmethod
-    @validator("load_page_post_attachments")
-    def check_load_page_post_attachments(cls, value: bool, values: Dict[str, Any]) -> bool:
+    @validator("load_page_post_attachments", "load_page_post_insights")
+    def check_load_page_post(cls, value: bool, values: Dict[str, Any]) -> bool:
         if value and not values.get("load_page_posts"):
-            raise ValueError(
-                "For set 'load_page_post_attachments' in 'True' "
-                "value 'load_page_posts' must be 'True' too"
-            )
+            raise ValueError("For set 'True' value 'load_page_posts' must be 'True' too")
         return value
 
     @classmethod

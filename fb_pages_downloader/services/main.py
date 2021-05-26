@@ -26,7 +26,7 @@ from ..models import (
     PostClicksByTypeUniqueLifetime,
     PostReactionsByTypeTotalUniqueLifetime,
 )
-from ..models.base import PageInsightAbstractModel
+from ..models.base import PageInsightAbstractModel, PagePostInsightAbstractModel
 from ..settings import InsightsForPeriodEnum, Settings
 
 
@@ -48,18 +48,25 @@ class MainService(ServiceMixin):
     _____|_____   |   ________|________   |                                 _________|_________
     |load_page|  ...  |load_page_posts|  ...                                |load_page_insights|
     |_________|       |_______________|                                     |__________________|
-                  ____________|________________________________________              |
-    ______________|_____________   |   ______________|_____________   |              |
-    |load_page_post_attachments|  ...  |update_or_create_page_post|  ...             |
-    |__________________________|       |__________________________|                  |
-                  |____________________________                            __________|_________
-    ______________|________________________   |            ________________|______________    |
-    |update_or_create_page_post_attachment|  ...           |update_or_create_page_insight|   ...
-    |_____________________________________|                |_____________________________|
+                  ____________|__________________________________________________________      |
+    ______________|_____________   |              |   |  ______________|_____________   |      |
+    |load_page_post_attachments|  ...             |   |  |update_or_create_page_post|  ...     |
+    |__________________________|                  |   |  |__________________________|          |
+                  |____________________________   |   |                     ___________________|
+    ______________|________________________   |   |   |     ________________|______________    |
+    |update_or_create_page_post_attachment|  ...  |   |     |update_or_create_page_insight|   ...
+    |_____________________________________|       |   |     |_____________________________|
+                          ________________________|   |
+                          |load_page_post_insights|  ...
+                          |_______________________|
+                                      |_____________________
+                     _________________|_________________   |
+                    |update_or_create_page_post_insight|  ...
+                    |__________________________________|
     """
 
     DATE_FORMAT = "%Y-%m-%dT%H:%M:%S+0000"
-    INSIGHT_MODELS = (
+    PAGE_INSIGHT_MODELS = (
         PagePostEngagementsDay,
         PagePostImpressionNonviralUniqueDay,
         PagePostImpressionOrganicUniqueDay,
@@ -73,6 +80,8 @@ class MainService(ServiceMixin):
         PageVideoViewsPaidDay,
         PageVideoViewsUniqueDay,
         PageVideoViewTimeDay,
+    )
+    PAGE_POST_INSIGHT_MODELS = (
         PostActivityByActionTypeUniqueLifetime,
         PostClicksByTypeUniqueLifetime,
         PostReactionsByTypeTotalUniqueLifetime,
@@ -168,7 +177,7 @@ class MainService(ServiceMixin):
                 tasks.append(task)
 
             if self.settings.load_page_insights:
-                for view_model in self.INSIGHT_MODELS:
+                for view_model in self.PAGE_INSIGHT_MODELS:
                     task = asyncio.create_task(self.load_page_insights(
                         view_model=view_model,
                         page_id=page_id,
@@ -238,17 +247,28 @@ class MainService(ServiceMixin):
             logger.info("Downloaded page post: page_post_id={}", page_post["id"])
             logger.debug("Page post payload: {}", page_post)
 
+            _, post_id = page_post["id"].split("_")
+
             task = asyncio.create_task(self.update_or_create_page_post(data=page_post))
             tasks.append(task)
 
             if self.settings.load_page_post_attachments:
-                _, post_id = page_post["id"].split("_")
                 task = asyncio.create_task(self.load_page_post_attachments(
                     page_id=page_id,
                     post_id=post_id,
                     access_token=access_token,
                 ))
                 tasks.append(task)
+
+            if self.settings.load_page_post_insights:
+                for view_model in self.PAGE_POST_INSIGHT_MODELS:
+                    task = asyncio.create_task(self.load_page_post_insights(
+                        view_model=view_model,
+                        page_id=page_id,
+                        post_id=post_id,
+                        access_token=access_token,
+                    ))
+                    tasks.append(task)
 
         if tasks:
             await asyncio.wait(tasks)
@@ -277,13 +297,13 @@ class MainService(ServiceMixin):
             "updated_time": data.get("updated_time"),
         }
 
-        page_post = await self.database_service.get_page_post(id=data["id"])
+        page_post = await self.database_service.get_page_post(id=id_)
         if page_post:
             await self.database_service.update_page_post(record=page_post, fields=fields)
-            logger.info("Updated page post: page_post_id={}", data["id"])
+            logger.info("Updated page post: page_post_id={}", id_)
         else:
             await self.database_service.create_page_post(fields=fields)
-            logger.info("Created page post: page_post_id={}", data["id"])
+            logger.info("Created page post: page_post_id={}", id_)
         logger.debug("Page post fields: {}", fields)
 
     @logger.catch()
@@ -335,6 +355,85 @@ class MainService(ServiceMixin):
             logger.debug("Page post attachment fields: {}", fields)
 
     @logger.catch()
+    async def load_page_post_insights(
+            self,
+            view_model: Type[PagePostInsightAbstractModel],
+            page_id: str,
+            post_id: str,
+            access_token: str,
+    ):
+        since = datetime.datetime.now()
+        since -= self.TIMEDELTA_MAPPING[self.settings.fb_pages_insights_for.value]
+        generator = self.facebook_pages_service.get_insights(
+            object_id=f"{page_id}_{post_id}",
+            access_token=access_token,
+            since=since,
+            metrics=[view_model.METRIC],
+            period=view_model.PERIOD.value,
+        )
+
+        tasks = []
+        async for page_post_insight in generator:
+            logger.info(
+                "Downloaded page post insight: page_id={}; post_id={}; metric={}; "
+                "page_insight_id={}",
+                page_id,
+                post_id,
+                view_model.METRIC,
+                page_post_insight["id"],
+            )
+            logger.debug("Page post insight payload: {}", page_post_insight)
+
+            task = asyncio.create_task(self.update_or_create_page_post_insight(
+                view_model=view_model,
+                page_id=page_id,
+                post_id=post_id,
+                data=page_post_insight,
+            ))
+            tasks.append(task)
+
+        if tasks:
+            await asyncio.wait(tasks)
+
+    @logger.catch()
+    async def update_or_create_page_post_insight(
+            self,
+            view_model: Type[PagePostInsightAbstractModel],
+            page_id: str,
+            post_id: str,
+            data: Dict[str, Any],
+    ):
+        get_function = self.database_service.generate_get_function(view_model)
+        create_function = self.database_service.generate_create_function(view_model)
+        update_function = self.database_service.generate_update_function(view_model)
+
+        for value in data["values"]:
+            fields = {
+                "m_period": data["period"],
+                "page_id": page_id,
+                "post_id": post_id,
+                **view_model.parse_value(value["value"]),
+            }
+            record = await get_function(page_id=page_id, post_id=post_id)
+            if record is None:
+                await create_function(fields=fields)
+                logger.info(
+                    "Created page post insight: page_id={}; post_id={}; metric={}",
+                    page_id,
+                    post_id,
+                    view_model.METRIC,
+                )
+            else:
+                await update_function(record=record, fields=fields)
+                logger.info(
+                    "Updated page post insight: page_id={}; post_id={}; metric={}",
+                    page_id,
+                    post_id,
+                    view_model.METRIC,
+                )
+            logger.debug("Page post insight fields: {}", fields)
+
+    @logger.catch()
     async def load_page_insights(
             self,
             view_model: Type[PageInsightAbstractModel],
@@ -343,8 +442,8 @@ class MainService(ServiceMixin):
     ):
         since = datetime.datetime.now()
         since -= self.TIMEDELTA_MAPPING[self.settings.fb_pages_insights_for.value]
-        generator = self.facebook_pages_service.get_page_insights(
-            page_id=page_id,
+        generator = self.facebook_pages_service.get_insights(
+            object_id=page_id,
             access_token=access_token,
             since=since,
             metrics=[view_model.METRIC],
@@ -354,8 +453,9 @@ class MainService(ServiceMixin):
         tasks = []
         async for page_insight in generator:
             logger.info(
-                "Downloaded page insight: page_id={}; page_insight_id={}",
+                "Downloaded page insight: page_id={}; metric={}; page_insight_id={}",
                 page_id,
+                view_model.METRIC,
                 page_insight["id"],
             )
             logger.debug("Page insight payload: {}", page_insight)
@@ -385,22 +485,24 @@ class MainService(ServiceMixin):
             fields = {
                 "m_period": data["period"],
                 "m_date": value["end_time"],
-                "value": value["value"],
                 "page_id": page_id,
+                **view_model.parse_value(value["value"]),
             }
             record = await get_function(m_date=fields["m_date"], page_id=page_id)
             if record is None:
                 await create_function(fields=fields)
                 logger.info(
-                    "Created page insight: page_id={}; date={}",
+                    "Created page insight: page_id={}; metric={}; date={}",
                     page_id,
+                    view_model.METRIC,
                     value["end_time"],
                 )
             else:
                 await update_function(record=record, fields=fields)
                 logger.info(
-                    "Updated page insight: page_id={}; date={}",
+                    "Updated page insight: page_id={}; metric={}; date={}",
                     page_id,
+                    view_model.METRIC,
                     value["end_time"],
                 )
             logger.debug("Page insight fields: {}", fields)
