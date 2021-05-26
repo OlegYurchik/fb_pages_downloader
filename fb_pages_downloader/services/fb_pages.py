@@ -140,8 +140,8 @@ class FacebookPagesService(ServiceMixin):
             params["metric"] = ",".join(metrics)
         if period is not None:
             params["period"] = period
-        if since is not None:
-            params["since"] = since.strftime("%Y-%m-%d")
+        # if since is not None:
+        #     params["since"] = since.strftime("%Y-%m-%d")
         async for insight in self.request_with_paging(url=url, params=params):
             yield insight
 
